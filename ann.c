@@ -23,7 +23,8 @@ llayer_toarray(lua_State *L) {
 
 struct layer {
 	int n;
-	float *data;
+	float *data;		// The input from the former layer
+				// or the image itself (for the input layer)
 };
 
 static struct layer
@@ -34,38 +35,55 @@ checklayer(lua_State *L, int idx) {
 	return layer;
 }
 
+// function init(self, image)
+/*
+ *	This function applies to the input layer only, to initialise its data
+ *	with the pixels from the image.
+ */
 static int
 llayer_init(lua_State *L) {
 	struct layer layer = checklayer(L, 1);
 	size_t sz = 0;
 	const uint8_t * image = (const uint8_t *)luaL_checklstring(L, 2, &sz);
-	if (sz != layer.n)
-		return luaL_error(L, "Invalid image size %d != %d", (int)sz, layer.n);
+	if (sz != layer.n)	// Handles size mismatch
+		return luaL_error(L, "Invalid image size %d != %d",
+				  (int)sz, layer.n);
 	int i;
 	for (i=0;i<layer.n;i++) {
-		layer.data[i] = image[i] / 255.0f;
+		layer.data[i] = image[i] / 255.0f;	// Convert range 0~255 
+							// to 0~1
 	}
 	lua_settop(L, 1);
 	return 1;
 }
 
+// function init_n(self, index)
+/*
+ *	This function will clean up all the data (set them to 0) the set
+ *	layer.data[index] to 1.f
+ */
 static int
 llayer_init_n(lua_State *L) {
 	struct layer layer = checklayer(L, 1);
 	int n = luaL_checkinteger(L, 2);
 	if (n < 0 || n >= layer.n)
 		return luaL_error(L, "Invalid n (%d)", n);
-	memset(layer.data, 0, sizeof(float) * layer.n);
+	memset(layer.data, 0, sizeof(float) * layer.n);	// Reset other slots
 	layer.data[n] = 1.0f;
 	lua_settop(L, 1);
 	return 1;
 }
 
+// function max(self)
+/*
+ *	Find out the maximum value in a layer. Return its index and its
+ *	proportion of all values.
+ */
 static int
 llayer_max(lua_State *L) {
 	struct layer layer = checklayer(L, 1);
 	float m = layer.data[0];
-	float s = m;
+	float s = m;	// The summary of all the values
 	int idx = 0;
 	int i;
 	for (i=1;i<layer.n;i++) {
@@ -76,7 +94,7 @@ llayer_max(lua_State *L) {
 		s += layer.data[i];
 	}
 	lua_pushinteger(L, idx);
-	lua_pushnumber(L, m / s);
+	lua_pushnumber(L, m / s);	// proportion
 	return 2;
 }
 
@@ -106,12 +124,19 @@ struct connection {
 	int output_n;
 };
 
+/*
+ *	Convert an integer returned by rand() to float.
+ *	The resulted float value is between 0 amd 1
+ */
 static inline float
 randf() {
 	float f = ((rand() & 0x7fff) + 1) / (float)0x8000;
 	return f;
 }
 
+/*
+ *	Normally-distributed
+ */
 static inline float
 randnorm(float r1, float r2) {
 	static const float PI = 3.1415927f;
@@ -119,6 +144,10 @@ randnorm(float r1, float r2) {
 	return x;
 }
 
+// function randn(self)
+/*
+ * 	Initialise connections with random values.
+ */
 static int
 lconnection_randn(lua_State *L) {
 	float *f = (float *)luaL_checkudata(L, 1, "ANN_CONNECTION");
@@ -133,6 +162,10 @@ lconnection_randn(lua_State *L) {
 	return 0;
 }
 
+// function (self, delta)
+/*
+ *	Accumulate delta. Used for batched training.
+ */
 static int
 lconnection_accumulate(lua_State *L) {
 	float *base = (float *)luaL_checkudata(L, 1, "ANN_CONNECTION");
@@ -148,6 +181,10 @@ lconnection_accumulate(lua_State *L) {
 	return 0;
 }
 
+// function (self,delta,eta)
+/*
+ *	Update connection strength
+ */
 static int
 lconnection_update(lua_State *L) {
 	float *base = (float *)luaL_checkudata(L, 1, "ANN_CONNECTION");
@@ -164,10 +201,16 @@ lconnection_update(lua_State *L) {
 	return 0;
 }
 
+/*
+ *	Get the offset of connections from output_idx
+ *	Strength of connections from the same output_idx is stored in a row,
+ *	The first output_n members are bias.
+ */
 static inline float *
 weight(float *base, struct connection *c, int output_idx) {
 	return base + c->input_n * output_idx + c->output_n;
 }
+
 
 static inline float *
 bias(float *base, struct connection *c) {
@@ -231,12 +274,18 @@ lconnection_import(lua_State *L) {
 	return 0;
 }
 
+
+// function (x,y)
+/*
+ *	Create connections from a layer with x neurons to one with y neurons.
+ */
 static int
 lconnection(lua_State *L) {
 	struct connection * c = (struct connection *)lua_newuserdatauv(L, sizeof(*c), 0);
 	c->input_n = luaL_checkinteger(L, 1);
 	c->output_n = luaL_checkinteger(L, 2);
 	size_t sz = (c->input_n * c->output_n + c->output_n) * sizeof(float);
+		// x * y floats in total
 	float * data = (float *)lua_newuserdatauv(L, sz, 1);
 	lua_pushvalue(L, -2);
 	lua_setiuservalue(L, -2, 1);
@@ -258,16 +307,38 @@ lconnection(lua_State *L) {
 	return 1;
 }
 
+/*
+ *	Sigmoid activation function
+ *	sigmoid(x) = 1 / (1 + exp(-x))
+ */
 static inline float
 sigmoid(float z) {
 	return 1.0f / (1.0f + expf(-z));
 }
 
+/*
+ *	Let phi(y) be the inverse function of y = sigmoid(x)
+ *	y		= 1 / (1 + exp(-x))
+ *	1 + exp(-x)	= 1 / y
+ *	exp(-x)		= 1 / y - 1
+ *	-x		= ln((1 - y)/ y)
+ *	x		= ln(y / (y - 1))
+ *	So phi(y) = ln(y / (y - 1))
+ *	phi'(y) = y / (y - 1) * (y / (y - 1))'
+ *	where	(y / (y - 1))' = - 1 / (y - 1)^2
+ *	phi'(y)	= (y / (y - 1)) * (-1 / (y - 1)^2)
+ *		= y * (1 - y)
+ */
 static inline float
 sigmoid_prime(float s) {
 	return s * (1-s);
 }
 
+// function (inputLayer, outputLayer, connections)
+/*
+ *	Calculate the inputs of outputLayer with data in inputLayer and
+ *	connection strength in connections.
+ */
 static int
 lfeedforward(lua_State *L) {
 	struct layer input = checklayer(L, 1);
@@ -276,23 +347,31 @@ lfeedforward(lua_State *L) {
 	lua_getiuservalue(L, 3, 1);
 	struct connection *c = (struct connection *)lua_touserdata(L, -1);
 	int i,j;
+
+	/*
+	 *	For each output (i)
+	 */
 	for (i=0;i<output.n;i++) {
 		float s = 0;
-		float *w = weight(f, c, i);
-		float *b = bias(f, c);
+		float *w = weight(f, c, i);	// Get the index of weight
+		float *b = bias(f, c);		// index of bias
 		for (j=0;j<input.n;j++) {
-			s += input.data[j] * w[j];
+			s += input.data[j] * w[j];	// weighted sum
 		}
-		output.data[i] = sigmoid(s + b[i]);
+		output.data[i] = sigmoid(s + b[i]);	// add sum to bias,
+							// then apply
+							// activation function
 	}
 	return 0;
 }
 
-// https://builtin.com/machine-learning/backpropagation-neural-network
+/*
+ *	The core part of back propagation
+ */
 
+// https://builtin.com/machine-learning/backpropagation-neural-network
 static struct connection *
-get_connection(lua_State *L, int idx) {
-	lua_getiuservalue(L, idx, 1);
+get_connection(lua_State *L, int idx) { lua_getiuservalue(L, idx, 1);
 	struct connection *c = (struct connection *)lua_touserdata(L, -1);
 	lua_pop(L, 1);
 	return c;
@@ -304,6 +383,11 @@ get_connection(lua_State *L, int idx) {
 // nabla_b := delta
 // nabla_w := dot(delta, Input)
 
+// function (input,result,expect,connction)
+/*
+ *	Initialise backpropagation for the output layer. Result is stored
+ *	in delta.
+ */
 static int
 lbackprop_last(lua_State *L) {
 	struct layer input = checklayer(L, 1);
@@ -316,11 +400,23 @@ lbackprop_last(lua_State *L) {
 	}
 	float *nabla_b = bias(delta, c);
 	int i, j;
+	/*
+	 *	
+	 */
 	for (i=0;i<c->output_n;i++) {
 		float *nabla_w = weight(delta, c, i);
+		/*
+		 *	result.data[i] - expect.data[i] is the error
+		 */
 		// cost derivative
-		float d = (result.data[i] - expect.data[i]) * sigmoid_prime(result.data[i]);
+		float d = (result.data[i] - expect.data[i]) *
+			   sigmoid_prime(result.data[i]);
 		nabla_b[i] = d;
+
+		/*
+		 *	Calculate delta by the contributions that each
+		 *	connection committed to the error
+		 */
 		for (j=0;j<input.n;j++) {
 			nabla_w[j] = d * input.data[j];
 		}
@@ -334,10 +430,13 @@ lbackprop_last(lua_State *L) {
 // nabla_b := delta
 // nabla_w := dot(delta, Input)
 
+// function (inputLayer, outputLayer, expect, delta)
+/*
+ *	Backpropagation for hidden layers. Result is stored in delta.
+ */
 static int
 lbackprop(lua_State *L) {
-	struct layer input = checklayer(L, 1);
-	struct layer z = checklayer(L, 2);
+	struct layer input = checklayer(L, 1); struct layer z = checklayer(L, 2);
 
 	float *delta = (float *)luaL_checkudata(L, 3, "ANN_CONNECTION");
 	struct connection *input_c = get_connection(L, 3);
